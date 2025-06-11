@@ -1,1 +1,349 @@
-Hello world!
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Localized Publish Times</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 10px;
+        background: #f9f9f9;
+        overflow: hidden;
+      }
+
+      .table-wrapper {
+        width: 100vw;
+        height: 100vh;
+        overflow: auto;
+      }
+
+      table {
+        border-collapse: collapse;
+        table-layout: auto;
+        min-width: max-content;
+      }
+
+      th,
+      td {
+        border: 2px dotted #fff;
+        padding: 2px;
+        white-space: nowrap;
+        font-weight: normal;
+      }
+
+      tbody .sticky-col {
+        text-align: left;
+      }
+
+      th.sortable:hover {
+        background-color: #eee;
+        cursor: pointer;
+      }
+
+      thead th {
+        position: sticky;
+        top: 0;
+        background: #fff;
+        z-index: 2;
+      }
+
+      .sticky-col {
+        position: sticky;
+        left: 0;
+        background: #fff;
+        z-index: 1;
+      }
+
+      thead .sticky-col {
+        z-index: 3;
+      }
+
+      .highlighted {
+        background-color: #e0e0e0 !important;
+      }
+
+      .hover-empty {
+        background-color: #f0f0f0 !important;
+      }
+
+      #context-menu {
+        position: absolute;
+        background: white;
+        border: 1px solid #ccc;
+        font-size: 10px;
+        z-index: 999;
+        display: none;
+      }
+
+      #context-menu div {
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+
+      #context-menu div:hover {
+        background-color: #eee;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="table-wrapper">
+      <table id="csv-table">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="context-menu"></div>
+
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+    <script>
+      const csvUrl =
+        "https://docs.google.com/spreadsheets/d/e/2PACX-1vR7HZ18VGHHeoInyIeLMFs731s1_LDQDav8Ot-lbSgM4yGy1LCmMRjPRUIDjHKxVuBc8UfdgtCr3aHf/pub?gid=439510976&single=true&output=csv";
+
+      let headers = [];
+      let data = [];
+      let currentSort = { column: null, asc: true };
+
+      function parseTimeValue(value) {
+        const units = {
+          y: 525600,
+          mo: 43200,
+          w: 10080,
+          d: 1440,
+          h: 60,
+          m: 1,
+          s: 1 / 60,
+        };
+        let total = 0;
+        const regex = /([\d.]+)(y|mo|w|d|h|m|s)/g;
+        let match;
+        while ((match = regex.exec(value))) {
+          total += parseFloat(match[1]) * (units[match[2]] || 0);
+        }
+        return total;
+      }
+
+      function interpolateColor(val, min, max, colors) {
+        const clamped = Math.min(1, Math.max(0, (val - min) / (max - min)));
+        const r = Math.round(
+          colors[0][0] + clamped * (colors[1][0] - colors[0][0])
+        );
+        const g = Math.round(
+          colors[0][1] + clamped * (colors[1][1] - colors[0][1])
+        );
+        const b = Math.round(
+          colors[0][2] + clamped * (colors[1][2] - colors[0][2])
+        );
+        return `rgb(${r}, ${g}, ${b})`;
+      }
+
+      function getColorForValue(minutes, original) {
+        if (!original || isNaN(minutes)) return "#ffffff";
+        const thresholds = [
+          {
+            min: 0,
+            max: 43200,
+            colors: [
+              [0, 100, 0],
+              [102, 187, 102],
+            ],
+          },
+          {
+            min: 43200,
+            max: 259200,
+            colors: [
+              [102, 187, 102],
+              [246, 231, 179],
+            ],
+          },
+          {
+            min: 259200,
+            max: 1051200,
+            colors: [
+              [246, 231, 179],
+              [244, 196, 145],
+            ],
+          },
+          {
+            min: 1051200,
+            max: 1576800,
+            colors: [
+              [244, 196, 145],
+              [255, 255, 255],
+            ],
+          },
+        ];
+        for (const t of thresholds) {
+          if (minutes <= t.max)
+            return interpolateColor(minutes, t.min, t.max, t.colors);
+        }
+        return "#ffffff";
+      }
+
+      function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).catch(console.error);
+      }
+
+      function showContextMenu(e, contentFn) {
+        e.preventDefault();
+        const menu = document.getElementById("context-menu");
+        menu.innerHTML = "";
+        const item = document.createElement("div");
+        item.textContent = "Copy";
+        item.onclick = () => {
+          copyToClipboard(contentFn());
+          menu.style.display = "none";
+        };
+        menu.appendChild(item);
+        menu.style.top = `${e.clientY}px`;
+        menu.style.left = `${e.clientX}px`;
+        menu.style.display = "block";
+      }
+
+      document.addEventListener("click", () => {
+        document.getElementById("context-menu").style.display = "none";
+      });
+
+      function sortByColumn(index) {
+        const key = headers[index];
+        const asc = currentSort.column === key ? !currentSort.asc : true;
+        currentSort = { column: key, asc };
+        data.sort((a, b) => {
+          const valA = (a[key] || "").trim();
+          const valB = (b[key] || "").trim();
+          if (!valA && valB) return 1;
+          if (valA && !valB) return -1;
+          return asc
+            ? parseTimeValue(valA) - parseTimeValue(valB)
+            : parseTimeValue(valB) - parseTimeValue(valA);
+        });
+        renderTable();
+      }
+
+      function reorderColumnsByRow(index) {
+        const row = data[index];
+        const baseHeader = headers[0];
+        const restHeaders = headers.slice(1);
+        const sorted = [...restHeaders].sort((a, b) => {
+          const valA = (row[a] || "").trim();
+          const valB = (row[b] || "").trim();
+          if (!valA && valB) return 1;
+          if (valA && !valB) return -1;
+          return parseTimeValue(valA) - parseTimeValue(valB);
+        });
+        headers = [baseHeader, ...sorted];
+        renderTable();
+      }
+
+      function renderTable() {
+        const thead = document.querySelector("thead");
+        const tbody = document.querySelector("tbody");
+        thead.innerHTML = "";
+        tbody.innerHTML = "";
+
+        const headerRow = document.createElement("tr");
+        headers.forEach((h, i) => {
+          const th = document.createElement("th");
+          th.textContent = h;
+          if (i === 0) th.classList.add("sticky-col");
+          th.classList.add("sortable");
+          th.addEventListener("click", () => sortByColumn(i));
+          th.addEventListener("contextmenu", (e) => {
+            if (i === 0) return;
+            showContextMenu(e, () => {
+              const lines = [h + "\n"];
+              data.forEach((row) => {
+                const val = row[h];
+                if (val && val.trim()) {
+                  lines.push(`${row[headers[0]]} (${val})`);
+                }
+              });
+              return lines.join("\n");
+            });
+          });
+          headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+
+        data.forEach((row, rowIndex) => {
+          const tr = document.createElement("tr");
+          headers.forEach((h, colIndex) => {
+            const td = document.createElement("td");
+            const value = row[h] || "";
+            td.textContent = value;
+
+            if (colIndex === 0) {
+              td.classList.add("sticky-col");
+              td.style.cursor = "pointer";
+              td.addEventListener("click", () => reorderColumnsByRow(rowIndex));
+              td.addEventListener("contextmenu", (e) => {
+                showContextMenu(e, () => {
+                  const lines = [value + "\n"];
+                  headers.slice(1).forEach((col) => {
+                    const val = row[col];
+                    if (val && val.trim()) {
+                      lines.push(`${col} (${val})`);
+                    }
+                  });
+                  return lines.join("\n");
+                });
+              });
+            } else {
+              const minutes = parseTimeValue(value);
+              td.style.backgroundColor = getColorForValue(minutes, value);
+            }
+
+            td.addEventListener("mouseover", () => {
+              document
+                .querySelectorAll("td, th")
+                .forEach((cell) =>
+                  cell.classList.remove("highlighted", "hover-empty")
+                );
+              document
+                .querySelectorAll(`thead th:nth-child(${colIndex + 1})`)
+                .forEach((cell) => cell.classList.add("highlighted"));
+              tr.querySelector("td.sticky-col")?.classList.add("highlighted");
+              document.querySelectorAll("tbody tr").forEach((rowEl) => {
+                const cell = rowEl.querySelector(
+                  `td:nth-child(${colIndex + 1})`
+                );
+                if (cell && cell.textContent.trim() === "")
+                  cell.classList.add("hover-empty");
+              });
+              tr.querySelectorAll("td").forEach((cell) => {
+                if (cell.textContent.trim() === "")
+                  cell.classList.add("hover-empty");
+              });
+            });
+
+            td.addEventListener("mouseleave", () => {
+              document
+                .querySelectorAll("td, th")
+                .forEach((cell) =>
+                  cell.classList.remove("highlighted", "hover-empty")
+                );
+            });
+
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+      }
+
+      fetch(csvUrl)
+        .then((res) => res.text())
+        .then((csv) => {
+          const parsed = Papa.parse(csv, {
+            header: true,
+            skipEmptyLines: true,
+          });
+          headers = parsed.meta.fields;
+          data = parsed.data.filter((row) => headers.every((h) => h in row));
+          renderTable();
+        });
+    </script>
+  </body>
+</html>
